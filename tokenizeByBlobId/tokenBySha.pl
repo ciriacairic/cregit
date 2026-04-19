@@ -118,8 +118,8 @@ if (-f $filename) {
     
 } else {
 
-  my ($fh, $file) = mkstemp( "tmpfile-in-XXXXX" );
-  my ($fout, $outfile) = mkstemp( "tmpfile-out-XXXXX" );
+  my ($fh, $file) = tempfile( "tmpfile-in-XXXXX", SUFFIX => ".$fileExt" );
+  my ($fout, $outfile) = tempfile( "tmpfile-out-XXXXX", SUFFIX => ".$fileExt" );
 
   print $fh $contents;
   close $fh;
