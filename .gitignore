@@ -1,3 +1,5 @@
 jars
 *project/project
 *target
+prettyPrint/tmpfile-*
+result
