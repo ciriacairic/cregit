@@ -59,6 +59,7 @@ my %mapLang = (
                "yaml" => "Yaml",
                "ac" => "M4",
                "am" => "M4",
+               "rs" => "Rust",
               );
 
 
