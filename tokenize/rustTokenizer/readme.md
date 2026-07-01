@@ -7,9 +7,9 @@ cregit (blameRepo / prettyPrint) — the same line:col token stream produced by
 `srcml2token` and the Go tokenizer. It adds Rust (`.rs`) support to the pipeline.
 
 Unlike the C/C++/Java path it does not go through srcML (which has no Rust
-grammar). It lexes directly with `rustc_lexer`, the lexer extracted from the Rust
-compiler, so it tolerates syntactically invalid input — intermediate states in a
-repository's history still tokenize.
+grammar). It lexes directly with `ra-ap-rustc_lexer`, rust-analyzer's maintained
+snapshot of the lexer used by the Rust compiler, so it tolerates syntactically
+invalid input — intermediate states in a repository's history still tokenize.
 
 ## Requirements
 
@@ -55,4 +55,4 @@ literals and comments are folded to spaces.
 
 ## License
 
-Depends on `rustc_lexer` (MIT / Apache-2.0).
+Depends on `ra-ap-rustc_lexer` and `phf` (both MIT / Apache-2.0).
