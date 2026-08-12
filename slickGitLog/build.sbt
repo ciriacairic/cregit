@@ -13,4 +13,3 @@ libraryDependencies ++= Seq(
 resolvers ++= Seq(
   "jgit-repo" at "https://download.eclipse.org/jgit/maven"
 )
-

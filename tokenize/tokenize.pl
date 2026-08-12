@@ -59,7 +59,7 @@ my $usage = "
 Usage $0 [options] <sourcefilename> <outputfile>*
 
 Options:
-   --language=<C/C++/Java/m4/Rust>
+   --language=<C/C++/Java/M4/Rust>
    --position
    --srcml=<path>          (forwarded to srcML-based parsers only)
    --srcml2token=<path>    (forwarded to srcML-based parsers only)
