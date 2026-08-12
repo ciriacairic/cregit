@@ -1,5 +1,7 @@
 jars
 *project/project
 *target
-prettyPrint/tmpfile-*
+*build
+.devenv
+.direnv
 result

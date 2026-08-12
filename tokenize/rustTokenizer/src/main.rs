@@ -1,5 +1,5 @@
 // rust_tokenizer: Rust source tokenizer for the cregit pipeline. Emits one token per
-// line for blameRepo and prettyPrint. See readme.md for the output format and behavior.
+// line for blameRepo and prettyPrint. See README.md for the output format and behavior.
 //
 // CLI: rust_tokenizer [--language=Rust] [--position] [--verbose] <source.rs>
 

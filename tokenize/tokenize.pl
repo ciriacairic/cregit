@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -70,10 +70,9 @@ Options:
 my $language = "";
 my $verbose;
 my $position = 0;
-# srcML-specific options. Accepted here so callers can configure pinned binary
-# paths once (e.g. via BFG_TOKENIZE_CMD in the nix flake) and have them reach
-# tokenizeSrcMl.pl without every caller knowing which language it is. For
-# non-srcML parsers (Rust, M4) these are silently ignored.
+# srcML-specific options. Accepted here so a single caller (e.g. BFG_TOKENIZE_CMD)
+# can pin the binary paths once and have them reach tokenizeSrcMl.pl without knowing
+# which language each blob is. For non-srcML parsers (Rust, M4) these are ignored.
 my $srcmlPath = "";
 my $srcml2tokenPath = "";
 my $ctagsPath = "";
@@ -156,8 +155,6 @@ sub Tokenize {
     if ($position) {
         push @command, "--position";
     }
-    # forward srcML-specific paths only to the srcML parser; other parsers
-    # would not understand them.
     if ($parsers{$language} eq $srcMlparser) {
         push @command, "--srcml=$srcmlPath"             if $srcmlPath ne "";
         push @command, "--srcml2token=$srcml2tokenPath" if $srcml2tokenPath ne "";

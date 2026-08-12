@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -67,8 +67,6 @@ my $cregitVersion = "1.0-RC2";
 #my $title = shift @ARGV;
 #my $headerFileName = shift @ARGV;
 #my $footerFileName = shift @ARGV;
-#my $dbName = '/home/linux/linux-token-bfg-4_10.db';
-#my $authorsDB = '/home/dmg/git.projects/l.analysis/new-authors/unified-authors.db';
 
 my $headerFileName = $commandPath . "/header.html";
 my $footerFileName = $commandPath . "/footer.html";
@@ -96,7 +94,10 @@ my $outputFile = shift @ARGV;
 my $title = shift @ARGV;
 $cregitRepoURL = shift @ARGV;
 
-my ($fh, $temp) = mkstemp( "tmpfile-XXXXX" );
+# build/ tempdir anchored to the script's dir, not the caller's CWD.
+my $buildDir = "$commandPath/build";
+make_path($buildDir) if not -d $buildDir;
+my ($fh, $temp) = mkstemp( "$buildDir/tmpfile-XXXXX" );
 
 select($fh);
 

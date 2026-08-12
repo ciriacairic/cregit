@@ -1,5 +1,4 @@
 // Smoke test: run the built binary on a fixture and check the stream is well-formed.
-// Mirrors the manual verification step in IMPLEMENTATION.md.
 
 use std::process::{Command, Output};
 
@@ -57,11 +56,11 @@ fn edge_cases_classify_correctly() {
 
 #[test]
 fn unicode_identifier_advances_columns_by_code_point_not_byte() {
-    // `café` is 4 chars / 5 bytes. The `(` immediately after must be at col 8 (1+4+space+4),
-    // not col 9 (which we would get if we counted bytes).
+    // `fn café()` is on line 18; `café` is 4 chars / 5 bytes. The `(` must be at col 8
+    // (1 + "fn " + 4 chars), not col 9 — which is what counting bytes would give.
     let s = run("edge_cases.rs");
     assert!(
-        s.contains("19:8\top|("),
+        s.contains("18:8\top|("),
         "expected `(` at col 8 after café, output was:\n{}",
         s
     );
