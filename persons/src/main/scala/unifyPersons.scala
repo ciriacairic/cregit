@@ -39,7 +39,7 @@ import impure._
 
 import slick.driver.SQLiteDriver.api._
 import java.io.File
-import java.util.Calendar 
+import java.util.{Calendar, Locale}
 
 
 object  unifyPersons {
@@ -196,7 +196,14 @@ object  unifyPersons {
 
     override def equals(that: Any): Boolean =
       that match {
-        case that: Person => that.canEqual(this) && this.hashCode == that.hashCode
+        case that: Person =>
+          that.canEqual(this) &&
+          name == that.name &&
+          key == that.key &&
+          email == that.email &&
+          lcEmail == that.lcEmail &&
+          lcUserId == that.lcUserId &&
+          lcDomain == that.lcDomain
         case _ => false
       }
     override def hashCode:Int = {
@@ -212,6 +219,36 @@ object  unifyPersons {
     }
   }
 
+  def splitEmail(st:String) = {
+    val fields = st.split("@", 2)
+    if (fields.size > 1) {
+      (fields(0).toLowerCase(Locale.ROOT), fields(1).toLowerCase(Locale.ROOT))
+    } else {
+      (fields(0).toLowerCase(Locale.ROOT), "")
+    }
+
+  }
+
+  def dealWithSingleWords(key:String, addon: String)= {
+    val noacc = strip_accents(key)
+    if (noacc.contains(' '))
+      noacc.toLowerCase
+    else (noacc+" at " +addon).toLowerCase
+  }
+
+  def unifyByEmail(setsNames: Iterable[Iterable[Person]]): Set[Set[Person]] = {
+    setsNames.foldLeft(Set.empty[Set[Person]])((cum, curi) => {
+      val cur = curi.toSet
+      val curEmails = cur.map{_.lcEmail}
+      val (hasCommon, rest) = cum.partition(_.map{_.lcEmail} & curEmails nonEmpty)
+      rest + (cur ++ hasCommon.flatten)
+    })
+  }
+
+  def preferredName(v: List[Person]): String = {
+    if (v(0).name.contains(" ")) v(0).name else v(0).email
+  }
+
   // return an iterator that returns, for each commit
   // a tuple of the author  and the committer info
   def git_commits_iterator(git:Git) = {
@@ -219,16 +256,6 @@ object  unifyPersons {
     val logs = git.log.all.call()
 
     val logsIt = logs.asScala.toIterator
-
-    def splitEmail(st:String) = {
-      val fields = st.split('@')
-      if (fields.size > 1) {
-        (fields(0), fields(1))
-      } else {
-        (fields(0), "")
-      }
-
-    }
 
     logsIt.map { l =>
       val author = l.getAuthorIdent().getEmailAddress
@@ -238,16 +265,6 @@ object  unifyPersons {
 
       val authorName = l.getAuthorIdent().getName
       val committerName = l.getCommitterIdent().getName
-
-      def dealWithSingleWords(key:String, addon: String)= {
-        // we don't like names that don't have spaces
-        // since they are usually reused (eg. Jim, root, etc)
-        // so instead, use the other field
-        val noacc = strip_accents(key)
-        if (noacc.contains(' '))
-          noacc.toLowerCase
-        else (noacc+" at " +addon).toLowerCase
-      }
 
       val authorKey = dealWithSingleWords(authorName, author)
       val commKey = dealWithSingleWords(committerName, committer)
@@ -279,8 +296,8 @@ object  unifyPersons {
       Row(index) {
         Set(
           StringCell(0,key),
-          StringCell(1,p.name),
-          StringCell(2,p.key),
+          StringCell(1,p.key),
+          StringCell(2,p.name),
           StringCell(3,p.email),
           StringCell(4,p.lcUserId),
           StringCell(5,p.lcDomain),
@@ -426,12 +443,7 @@ object  unifyPersons {
     println("Unifying by email...")
 
     // unify by common email
-    val unifiedByEmail = setsNames.foldLeft(Set.empty[Set[Person]])((cum, curi) => {
-      val cur = curi.toSet
-      val curEmails = cur.map{_.lcEmail}
-      val (hasCommon, rest) = cum.partition(_.map{_.lcEmail} & curEmails nonEmpty)
-      rest + (cur ++ hasCommon.flatten)
-    })
+    val unifiedByEmail = unifyByEmail(setsNames)
 
     println(s"    ... reduced to ${unifiedByEmail.size} emails")
 
@@ -455,7 +467,7 @@ object  unifyPersons {
     // attach the count of all, authored, committed
 
     val keys = mapByKey.map{ case (k,v) =>
-      val nameToUse = if (v(0).name.contains(" ")) v(0).name else v(0).email
+      val nameToUse = preferredName(v)
       val identCount = v.size
       val countAll = v.map{ e =>
         (everybody(e),

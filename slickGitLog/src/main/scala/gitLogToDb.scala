@@ -139,6 +139,16 @@ object gitLogToDB extends ProgramInfo {
   
   def commitsPerOp = 10000
 
+  def remove_trailing_space(st:String) = st.replaceAll(" $", "")
+
+  def parseGraftLine(l: String): Seq[(String, Int, String)] = {
+    val fields = l.trim.split("\\s+")
+    if (fields.length < 2) Seq.empty
+    else fields.tail.zipWithIndex.map { case (parent, idx) =>
+      (fields.head, idx, parent)
+    }
+  }
+
   def git_commits_iterator(git:Git) = {
 
     val logs = git.log.all.call()
@@ -164,8 +174,6 @@ object gitLogToDB extends ProgramInfo {
 
       val aut = l.getAuthorIdent()
       val com = l.getCommitterIdent()
-
-      def remove_trailing_space(st:String) = st.replaceAll(" $", "")
 
       (
         // first is the commit tuple
@@ -196,19 +204,12 @@ object gitLogToDB extends ProgramInfo {
   }
 
   def findGrafts(repo:String, git:Git) = {
-    val graftsFileName = repo + (if (isBare(git)) "" else "/.git/") + "info/grafts"
+    val graftsFile = new File(new File(git.getRepository.getDirectory, "info"), "grafts")
 
-    // we assume that the heads of the grafts do not have any other parent...
-    // otherwise parent cannot be 1
-
-    // but why fix now? we might never run into that case
-    // we'll see
-
-    if ((new File(graftsFileName)).exists) {
-      Source.fromFile(graftsFileName).getLines.map { l =>
-        val f = l.split(' ')
-        (f(1), 1, f(0))
-      }.toList
+    if (graftsFile.exists) {
+      val source = Source.fromFile(graftsFile)
+      try source.getLines.flatMap(parseGraftLine).toList
+      finally source.close()
     } else {
       List()
     }
@@ -302,7 +303,9 @@ object gitLogToDB extends ProgramInfo {
 
       println("Processing grafts...")
 
+      val graftedCommits = grafts.map(_._1).toSet
       val insertGr = DBIO.seq(
+        parents.filter(_.cid inSet graftedCommits).delete,
         parents ++= grafts)
 
       Await.result(db.run(insertGr), Duration.Inf)
