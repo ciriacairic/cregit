@@ -11,10 +11,12 @@ import java.nio.file.{Files, Paths}
  * destination repo and persists `(orig → new)` mappings to SQLite, so a
  * subsequent invocation can resume incrementally.
  *
- *   blobExec [--abort-on-error] <src.git> <dst.git> <db.sqlite> <command> <fileMaskRegex>
+ *   blobExec [--abort-on-error] [--prepare-first] <src.git> <dst.git> <db.sqlite> <command> <fileMaskRegex>
  *
  *   --abort-on-error  exit immediately (status 2) on the first non-zero
  *                     exit from <command>, instead of skipping that blob
+ *   --prepare-first   tokenize all missing blobs in a global bounded queue
+ *                     before rebuilding commits (experimental)
  *   <src.git>         path to the bare source repo (read-only)
  *   <dst.git>         path to the bare destination repo (created if missing)
  *   <db.sqlite>       path to the SQLite mapping file (created if missing)
@@ -30,10 +32,12 @@ import java.nio.file.{Files, Paths}
 object Main {
 
   private val Usage =
-    """Usage: blobExec [--abort-on-error] <src.git> <dst.git> <db.sqlite> <command> <fileMaskRegex>
+    """Usage: blobExec [--abort-on-error] [--prepare-first] <src.git> <dst.git> <db.sqlite> <command> <fileMaskRegex>
       |
       |  --abort-on-error  exit immediately (status 2) on the first non-zero
       |                    exit from <command>, instead of skipping that blob
+      |  --prepare-first   prepare all missing blobs in a global bounded queue
+      |                    before rebuilding commits (experimental)
       |  <src.git>         bare source repo (read-only)
       |  <dst.git>         bare destination repo (created on first run, reused on incremental)
       |  <db.sqlite>       SQLite mapping file (created on first run, reused on incremental)
@@ -44,8 +48,9 @@ object Main {
   def main(args: Array[String]): Unit = {
     val (flags, positional) = args.partition(_.startsWith("-"))
 
-    val abortOnError = flags.foldLeft(false) {
-      case (_, "--abort-on-error") => true
+    val (abortOnError, prepareFirst) = flags.foldLeft((false, false)) {
+      case ((_, prepare), "--abort-on-error") => (true, prepare)
+      case ((abort, _), "--prepare-first")    => (abort, true)
       case (_, other) =>
         System.err.println(s"Error: unknown flag [$other]")
         System.err.println(Usage)
@@ -83,7 +88,7 @@ object Main {
     val incremental = Files.isDirectory(dstPath)
     println(
       s"blobExec: src=$srcPath dst=$dstPath db=$dbPath command=$command mask=$mask " +
-        s"abortOnError=$abortOnError incremental=$incremental"
+        s"abortOnError=$abortOnError prepareFirst=$prepareFirst incremental=$incremental"
     )
 
     val src: FileRepository = openSrc(srcPath)
@@ -97,7 +102,10 @@ object Main {
 
     val stats = try {
       val parallelism = math.max(1, Runtime.getRuntime.availableProcessors)
-      val walker = new Walker(src, dst, mapping, mask.r, command, abortOnError, parallelism)
+      val walker = new Walker(
+        src, dst, mapping, mask.r, command, abortOnError, parallelism,
+        prepareFirst = prepareFirst
+      )
       walker.run()
     } finally {
       mapping.close()

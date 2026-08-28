@@ -134,4 +134,45 @@ class MappingSpec extends AnyFunSuite with Matchers {
       m.allCommitOrigShas.toSet shouldEqual Set("a", "b", "c")
     }
   }
+
+  test("blob task queue is durable, deduplicated, and bounded by the requested page size") {
+    withMapping() { m =>
+      m.enqueueBlobTask("b1", "src/a.c", "a.c") shouldBe true
+      m.enqueueBlobTask("b1", "src/a.c", "a.c") shouldBe false
+      m.enqueueBlobTask("b1", "lib/a.c", "a.c") shouldBe true
+      m.enqueueBlobTask("b2", "src/b.c", "b.c") shouldBe true
+
+      m.pendingBlobTaskCount shouldEqual 3
+      m.pendingBlobTasks(2).size shouldEqual 2
+      m.pendingBlobTasks(10).toSet shouldEqual Set(
+        Mapping.BlobTaskRow("b1", "src/a.c", "a.c"),
+        Mapping.BlobTaskRow("b1", "lib/a.c", "a.c"),
+        Mapping.BlobTaskRow("b2", "src/b.c", "b.c")
+      )
+
+      m.deleteBlobTask("b1", "src/a.c")
+      m.pendingBlobTaskCount shouldEqual 2
+    }
+  }
+
+  test("mapped blobs cannot be enqueued as pending work") {
+    withMapping() { m =>
+      m.putBlob("orig", "src/a.c", "new")
+      m.enqueueBlobTask("orig", "src/a.c", "a.c") shouldBe false
+      m.pendingBlobTaskCount shouldEqual 0
+    }
+  }
+
+  test("completing a blob task can atomically write the map and remove the queue row") {
+    withMapping() { m =>
+      m.enqueueBlobTask("orig", "src/a.c", "a.c") shouldBe true
+      m.inTx {
+        m.putBlob("orig", "src/a.c", "new")
+        m.deleteBlobTask("orig", "src/a.c")
+      }
+      m.getBlob("orig", "src/a.c") shouldBe Some("new")
+      m.pendingBlobTaskCount shouldEqual 0
+      m.enqueueBlobTask("orig", "src/a.c", "a.c") shouldBe false
+    }
+  }
 }

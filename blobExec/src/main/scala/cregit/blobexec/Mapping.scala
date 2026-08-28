@@ -31,6 +31,15 @@ final class Mapping private (conn: Connection) extends AutoCloseable {
   // silently keeping the original row on conflict is safe.
   private val selBlob   = conn.prepareStatement("SELECT new_blob FROM blob_map WHERE orig_blob = ? AND path = ?")
   private val insBlob   = conn.prepareStatement("INSERT OR IGNORE INTO blob_map(orig_blob, path, new_blob) VALUES (?, ?, ?)")
+  private val insBlobTask = conn.prepareStatement(
+    "INSERT OR IGNORE INTO blob_task(orig_blob, path, filename) " +
+      "SELECT ?, ?, ? WHERE NOT EXISTS " +
+      "(SELECT 1 FROM blob_map WHERE orig_blob = ? AND path = ?)"
+  )
+  private val selBlobTasks = conn.prepareStatement(
+    "SELECT orig_blob, path, filename FROM blob_task ORDER BY created_at, orig_blob, path LIMIT ?"
+  )
+  private val delBlobTask = conn.prepareStatement("DELETE FROM blob_task WHERE orig_blob = ? AND path = ?")
   private val selCommit = conn.prepareStatement("SELECT new_commit FROM commit_map WHERE orig_commit = ?")
   private val insCommit = conn.prepareStatement("INSERT OR IGNORE INTO commit_map(orig_commit, new_commit) VALUES (?, ?)")
   private val selTree   = conn.prepareStatement("SELECT new_tree FROM tree_map WHERE orig_tree = ?")
@@ -49,6 +58,49 @@ final class Mapping private (conn: Connection) extends AutoCloseable {
 
   def putBlob(origBlob: String, path: String, newBlob: String): Unit =
     Mapping.execute(insBlob, origBlob, path, newBlob)
+
+  /** Add a durable preparation task unless the blob is already mapped or
+    * the same task was discovered previously. Returns true only for a new
+    * queue row. */
+  def enqueueBlobTask(origBlob: String, path: String, filename: String): Boolean = {
+    insBlobTask.setString(1, origBlob)
+    insBlobTask.setString(2, path)
+    insBlobTask.setString(3, filename)
+    insBlobTask.setString(4, origBlob)
+    insBlobTask.setString(5, path)
+    insBlobTask.executeUpdate() == 1
+  }
+
+  /** Return at most `limit` pending tasks. Completed rows are deleted, so
+    * repeatedly reading the first page keeps memory bounded. */
+  def pendingBlobTasks(limit: Int): Vector[Mapping.BlobTaskRow] = {
+    require(limit > 0, "blob task limit must be positive")
+    selBlobTasks.setInt(1, limit)
+    val rs = selBlobTasks.executeQuery()
+    try Iterator
+      .continually {
+        if (rs.next()) Some(Mapping.BlobTaskRow(
+          origBlob = rs.getString(1),
+          path = rs.getString(2),
+          filename = rs.getString(3)
+        )) else None
+      }
+      .takeWhile(_.isDefined)
+      .flatten
+      .toVector
+    finally rs.close()
+  }
+
+  def pendingBlobTaskCount: Int = {
+    val st = conn.createStatement()
+    try {
+      val rs = st.executeQuery("SELECT COUNT(*) FROM blob_task")
+      try { rs.next(); rs.getInt(1) } finally rs.close()
+    } finally st.close()
+  }
+
+  def deleteBlobTask(origBlob: String, path: String): Unit =
+    Mapping.execute(delBlobTask, origBlob, path)
 
   def getCommit(origCommit: String): Option[String] =
     Mapping.selectString(selCommit, origCommit)
@@ -144,7 +196,8 @@ final class Mapping private (conn: Connection) extends AutoCloseable {
   }
 
   override def close(): Unit = {
-    List(selBlob, insBlob, selCommit, insCommit, selTree, insTree,
+    List(selBlob, insBlob, insBlobTask, selBlobTasks, delBlobTask,
+         selCommit, insCommit, selTree, insTree,
          selRef, insRef, delRef, selMeta, insMeta)
       .foreach(s => try s.close() catch { case _: Throwable => () })
     conn.close()
@@ -152,6 +205,8 @@ final class Mapping private (conn: Connection) extends AutoCloseable {
 }
 
 object Mapping {
+
+  final case class BlobTaskRow(origBlob: String, path: String, filename: String)
 
   /** Mismatch between the recorded command/mask and the values passed in. */
   final class MetaMismatchException(message: String) extends RuntimeException(message)
@@ -175,6 +230,13 @@ object Mapping {
       |  path         TEXT    NOT NULL,
       |  new_blob     TEXT    NOT NULL,
       |  processed_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+      |  PRIMARY KEY (orig_blob, path)
+      |)""".stripMargin,
+    """CREATE TABLE IF NOT EXISTS blob_task (
+      |  orig_blob  TEXT    NOT NULL,
+      |  path       TEXT    NOT NULL,
+      |  filename   TEXT    NOT NULL,
+      |  created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
       |  PRIMARY KEY (orig_blob, path)
       |)""".stripMargin,
     """CREATE TABLE IF NOT EXISTS tree_map (

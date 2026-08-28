@@ -7,6 +7,7 @@ import org.eclipse.jgit.treewalk.{CanonicalTreeParser, TreeWalk}
 
 import java.util.concurrent.{Executors, TimeUnit}
 import scala.collection.immutable.{Map => IMap}
+import scala.collection.mutable
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.jdk.CollectionConverters._
@@ -41,21 +42,29 @@ final class Walker(
     fileMask: Regex,
     command: String,
     abortOnError: Boolean,
-    parallelism: Int
+    parallelism: Int,
+    prepareFirst: Boolean = false
 ) {
   import Walker._
 
   // -- entry point ---------------------------------------------------------
 
-  def run(): WalkStats = {
+  def run(): WalkStats =
+    if (prepareFirst) runPrepareFirst()
+    else runCommitLocal()
+
+  private def newCommitWalk(): RevWalk = {
     val revWalk = new RevWalk(src)
     revWalk.sort(RevSort.TOPO, true)
     revWalk.sort(RevSort.REVERSE, true)
+    markUninteresting(revWalk)
+    markStartRefs(revWalk)
+    revWalk
+  }
 
+  private def runCommitLocal(): WalkStats = {
+    val revWalk = newCommitWalk()
     try {
-      markUninteresting(revWalk)
-      markStartRefs(revWalk)
-
       val (commitsProcessed, blobsRun, blobsHit, aborted) = walkCommits(revWalk)
       val refsCount =
         if (aborted) 0
@@ -71,6 +80,58 @@ final class Walker(
       )
     } finally revWalk.close()
   }
+
+  /** Prepare every matching blob before rebuilding any commit. This keeps
+    * the external-command pool busy across commit boundaries while the
+    * durable SQLite queue bounds memory and supports restart after failure. */
+  private def runPrepareFirst(): WalkStats = {
+    val discoveryStart = System.nanoTime()
+    val discoveryWalk = newCommitWalk()
+    val (commitsScanned, tasksQueued) =
+      try discoverBlobTasks(discoveryWalk)
+      finally discoveryWalk.close()
+    val discoveryMs = elapsedMillis(discoveryStart)
+    println(
+      s"blobExec prepare-first discovery: commitsScanned=$commitsScanned " +
+        s"tasksQueued=$tasksQueued pending=${mapping.pendingBlobTaskCount} elapsedMs=$discoveryMs"
+    )
+
+    val preparationStart = System.nanoTime()
+    val (blobsRun, preparationAborted) = preparePendingBlobs()
+    val preparationMs = elapsedMillis(preparationStart)
+    println(
+      s"blobExec prepare-first tokenization: tasksRun=$blobsRun " +
+        s"pending=${mapping.pendingBlobTaskCount} aborted=$preparationAborted elapsedMs=$preparationMs"
+    )
+
+    if (preparationAborted) {
+      WalkStats(0, 0, blobsRun, 0, 0, aborted = true)
+    } else {
+      val reconstructionStart = System.nanoTime()
+      val rewriteWalk = newCommitWalk()
+      try {
+        val (commitsProcessed, unexpectedRuns, blobsHit, aborted) =
+          walkCommits(rewriteWalk, preparedOnly = true)
+        val refsCount = if (aborted) 0 else projectRefs(rewriteWalk)
+        val reconstructionMs = elapsedMillis(reconstructionStart)
+        println(
+          s"blobExec prepare-first reconstruction: commitsProcessed=$commitsProcessed " +
+            s"cacheHits=$blobsHit elapsedMs=$reconstructionMs"
+        )
+        WalkStats(
+          commitsProcessed       = commitsProcessed,
+          commitsAlreadyMapped   = 0,
+          blobsRunThroughCommand = blobsRun + unexpectedRuns,
+          blobsCacheHit          = blobsHit,
+          refsProjected          = refsCount,
+          aborted                = aborted
+        )
+      } finally rewriteWalk.close()
+    }
+  }
+
+  private def elapsedMillis(startNanos: Long): Long =
+    (System.nanoTime() - startNanos) / 1000000L
 
   // -- ref preparation -----------------------------------------------------
 
@@ -110,10 +171,115 @@ final class Walker(
     }
   }
 
+  // -- prepare-first discovery and execution ------------------------------
+
+  /** Inventory globally unique `(blob, path)` misses into SQLite. Tree
+    * contents are never retained; the in-memory set contains only tree ids
+    * plus path prefixes and prevents rescanning unchanged subtrees. */
+  private def discoverBlobTasks(revWalk: RevWalk): (Int, Int) = {
+    val seenTrees = mutable.HashSet.empty[(String, String)]
+    var commitsScanned = 0
+    var tasksQueued = 0
+    val iter = revWalk.iterator()
+    while (iter.hasNext) {
+      val rc = iter.next()
+      tasksQueued += mapping.inTx {
+        discoverTreeTasks(rc.getTree.getId, pathPrefix = "", seenTrees)
+      }
+      commitsScanned += 1
+    }
+    (commitsScanned, tasksQueued)
+  }
+
+  private def discoverTreeTasks(
+      origTreeId: ObjectId,
+      pathPrefix: String,
+      seenTrees: mutable.Set[(String, String)]
+  ): Int = {
+    // Preserve the current tree-map short circuit. A mapped tree has already
+    // been assembled from mapped blobs in a prior successful reconstruction.
+    if (mapping.getTree(origTreeId.name).isDefined) return 0
+    if (!seenTrees.add((origTreeId.name, pathPrefix))) return 0
+
+    val reader = src.newObjectReader()
+    try {
+      val tw = new TreeWalk(reader)
+      try {
+        tw.addTree(new CanonicalTreeParser(null, reader, origTreeId))
+        tw.setRecursive(false)
+        var queued = 0
+        while (tw.next()) {
+          val mode = tw.getFileMode(0)
+          val name = tw.getNameString
+          val id = tw.getObjectId(0)
+          val fullPath = pathPrefix + name
+          if (mode == FileMode.TREE) {
+            queued += discoverTreeTasks(id, fullPath + "/", seenTrees)
+          } else if (mode != FileMode.GITLINK && fileMask.findFirstIn(name).isDefined) {
+            if (mapping.enqueueBlobTask(id.name, fullPath, name)) queued += 1
+          }
+        }
+        queued
+      } finally tw.close()
+    } finally reader.close()
+  }
+
+  /** Drain the durable queue in bounded batches. Workers write Git objects
+    * with thread-confined inserters; only this thread updates SQLite. */
+  private def preparePendingBlobs(): (Int, Boolean) = {
+    val pool = Executors.newFixedThreadPool(parallelism)
+    implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(pool)
+    val batchSize = math.max(parallelism, parallelism * 16)
+    var tasksRun = 0
+    var aborted = false
+    var finished = false
+
+    try {
+      while (!finished && !aborted) {
+        val batch = mapping.pendingBlobTasks(batchSize)
+        if (batch.isEmpty) {
+          finished = true
+        } else {
+          val futures = batch.map { row =>
+            val task = BlobMissTask(ObjectId.fromString(row.origBlob), row.filename, row.path)
+            Future(task -> runBlobTask(task))
+          }
+          val results = Await.result(Future.sequence(futures), Duration.Inf)
+          tasksRun += results.size
+
+          // Persist successful work even if another task in the same batch
+          // requested an abort. Its Git objects already exist, and retaining
+          // the mapping makes the next invocation genuinely resumable.
+          mapping.inTx {
+            results.foreach {
+              case (task, BlobExec.Outcome.Replace(newId)) =>
+                mapping.putBlob(task.origId.name, task.fullPath, newId.name)
+                mapping.deleteBlobTask(task.origId.name, task.fullPath)
+              case (task, BlobExec.Outcome.Skip) =>
+                mapping.putBlob(task.origId.name, task.fullPath, task.origId.name)
+                mapping.deleteBlobTask(task.origId.name, task.fullPath)
+              case (_, _: BlobExec.Outcome.Abort) => ()
+            }
+          }
+          aborted = results.exists { case (_, outcome) =>
+            outcome.isInstanceOf[BlobExec.Outcome.Abort]
+          }
+        }
+      }
+    } finally {
+      pool.shutdown()
+      val _ = pool.awaitTermination(1, TimeUnit.MINUTES)
+    }
+    (tasksRun, aborted)
+  }
+
   // -- commit loop ---------------------------------------------------------
 
   /** Returns (commitsProcessed, blobsRun, blobsHit, aborted). */
-  private def walkCommits(revWalk: RevWalk): (Int, Int, Int, Boolean) = {
+  private def walkCommits(
+      revWalk: RevWalk,
+      preparedOnly: Boolean = false
+  ): (Int, Int, Int, Boolean) = {
     val pool = Executors.newFixedThreadPool(parallelism)
     implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(pool)
     val treeInserter   = dst.newObjectInserter()
@@ -133,8 +299,20 @@ final class Walker(
         // Build a pure plan for this commit's tree.
         val (plan, artifacts) = buildTreePlan(rc.getTree.getId, pathPrefix = "")
 
-        // Run all matching-blob misses in parallel.
-        val (resolved, abortFromBlob) = resolveMisses(artifacts.misses, pool)
+        // In prepare-first mode every miss must already be in blob_map. The
+        // assertion catches divergence between discovery and reconstruction
+        // instead of silently falling back to commit-local scheduling.
+        val (resolved, abortFromBlob) =
+          if (preparedOnly) {
+            if (artifacts.misses.nonEmpty) {
+              val first = artifacts.misses.head
+              throw new IllegalStateException(
+                s"prepare-first invariant failed: blob ${first.origId.name} " +
+                  s"at ${first.fullPath} was not prepared"
+              )
+            }
+            (IMap.empty[(String, String), ObjectId], false)
+          } else resolveMisses(artifacts.misses, pool)
 
         if (abortFromBlob) {
           aborted = true
@@ -156,6 +334,10 @@ final class Walker(
             // Matching blobs the cmd resolved (Replace or Skip outcomes).
             resolved.foreach { case ((origSha, path), newId) =>
               mapping.putBlob(origSha, path, newId.name)
+              // A user may resume an interrupted prepare-first run with the
+              // legacy strategy. Completing the same key here must also
+              // remove its durable queue row.
+              mapping.deleteBlobTask(origSha, path)
             }
             // Identity rows for non-matching blobs we walked through.
             // INSERT OR IGNORE keeps the original processed_at if a prior
@@ -267,32 +449,7 @@ final class Walker(
     val unique = misses.map(m => (m.origId.name, m.fullPath) -> m).toMap.values.toVector
 
     val futures = unique.map { task =>
-      Future {
-        val bytes = readBlob(task.origId)
-        val workerInserter = dst.newObjectInserter()
-        try {
-          val outcome = BlobExec.run(
-            bytes        = bytes,
-            origSha      = task.origId.name,
-            filename     = task.filename,
-            fullPath     = task.fullPath,
-            command      = command,
-            abortOnError = abortOnError,
-            inserter     = workerInserter
-          )
-          // For Skip outcomes (identical output OR non-zero exit with
-          // abortOnError=false) we keep the original blob id, so the dst
-          // tree will reference it — meaning the bytes must exist in dst.
-          // For Replace outcomes the worker has already inserted the new
-          // blob. For Abort we do nothing (caller short-circuits).
-          outcome match {
-            case BlobExec.Outcome.Skip => workerInserter.insert(OBJ_BLOB, bytes); ()
-            case _                     => ()
-          }
-          workerInserter.flush()
-          (task, outcome)
-        } finally workerInserter.close()
-      }
+      Future(task -> runBlobTask(task))
     }
 
     val results = Await.result(Future.sequence(futures), Duration.Inf)
@@ -309,6 +466,32 @@ final class Walker(
       }.toMap
       (resolved, false)
     }
+  }
+
+  /** Execute one transformation with a thread-confined inserter. Shared by
+    * commit-local and prepare-first scheduling so their blob semantics stay
+    * identical. */
+  private def runBlobTask(task: BlobMissTask): BlobExec.Outcome = {
+    val bytes = readBlob(task.origId)
+    val workerInserter = dst.newObjectInserter()
+    try {
+      val outcome = BlobExec.run(
+        bytes        = bytes,
+        origSha      = task.origId.name,
+        filename     = task.filename,
+        fullPath     = task.fullPath,
+        command      = command,
+        abortOnError = abortOnError,
+        inserter     = workerInserter
+      )
+      // Skip keeps the original id, so its bytes must also exist in dst.
+      outcome match {
+        case BlobExec.Outcome.Skip => workerInserter.insert(OBJ_BLOB, bytes); ()
+        case _                     => ()
+      }
+      workerInserter.flush()
+      outcome
+    } finally workerInserter.close()
   }
 
   private def readBlob(id: ObjectId): Array[Byte] = {

@@ -77,12 +77,16 @@ class WalkerIntegrationSpec extends AnyFunSuite with Matchers with BeforeAndAfte
       dbPath: Path,
       command: String,
       mask: String,
-      abortOnError: Boolean = false
+      abortOnError: Boolean = false,
+      prepareFirst: Boolean = false
   ): WalkStats = {
     val dst = openBare(dstPath)
     val mapping = Mapping.open(dbPath, command, mask)
     try {
-      val walker = new Walker(srcRepo, dst, mapping, mask.r, command, abortOnError, parallelism = 4)
+      val walker = new Walker(
+        srcRepo, dst, mapping, mask.r, command, abortOnError,
+        parallelism = 4, prepareFirst = prepareFirst
+      )
       walker.run()
     } finally {
       mapping.close()
@@ -220,6 +224,120 @@ class WalkerIntegrationSpec extends AnyFunSuite with Matchers with BeforeAndAfte
       fileAtHead(dst, "master", "a.h") shouldBe Some("DEF\n")
       fileAtHead(dst, "master", "README.md") shouldBe Some("leave-me-alone\n")
     } finally dst.close()
+  }
+
+  test("prepare-first produces the same Git history as commit-local scheduling") {
+    val w = freshWorkDir("prepare-equivalence")
+    val srcDir = w.resolve("src")
+    val legacyDst = w.resolve("legacy.git")
+    val preparedDst = w.resolve("prepared.git")
+    val legacyDb = w.resolve("legacy.sqlite")
+    val preparedDb = w.resolve("prepared.sqlite")
+    val cmd = shellScript(w, "tr a-z A-Z")
+
+    val git = initSrc(srcDir)
+    writeAndCommit(git, Map("src/a.c" -> "alpha\n", "README.md" -> "one\n"), "first")
+    writeAndCommit(git, Map("src/b.c" -> "beta\n"), "second")
+    git.branchCreate().setName("feature").call()
+    git.checkout().setName("feature").call()
+    writeAndCommit(git, Map("src/a.c" -> "gamma\n"), "feature work")
+    git.checkout().setName("master").call()
+    git.tag().setName("v1").setAnnotated(true).setMessage("release").call()
+
+    val legacy = runWalker(git.getRepository, legacyDst, legacyDb, cmd, """\.c$""")
+    val prepared = runWalker(
+      git.getRepository, preparedDst, preparedDb, cmd, """\.c$""",
+      prepareFirst = true
+    )
+
+    prepared.aborted shouldBe false
+    prepared.commitsProcessed shouldEqual legacy.commitsProcessed
+    prepared.blobsRunThroughCommand shouldEqual legacy.blobsRunThroughCommand
+
+    val legacyRepo = openBare(legacyDst)
+    val preparedRepo = openBare(preparedDst)
+    try {
+      Seq("refs/heads/master", "refs/heads/feature", "refs/tags/v1").foreach { name =>
+        preparedRepo.exactRef(name).getObjectId shouldEqual legacyRepo.exactRef(name).getObjectId
+      }
+    } finally {
+      preparedRepo.close()
+      legacyRepo.close()
+    }
+
+    val m = Mapping.open(preparedDb, cmd, """\.c$""")
+    try m.pendingBlobTaskCount shouldEqual 0 finally m.close()
+  }
+
+  test("prepare-first keeps the same blob distinct at different paths") {
+    val w = freshWorkDir("prepare-path")
+    val srcDir = w.resolve("src")
+    val dstDir = w.resolve("dst.git")
+    val db = w.resolve("map.sqlite")
+    val cmd = shellScript(w, "printf '%s:' \"$BFG_PATH\"; cat")
+
+    val git = initSrc(srcDir)
+    writeAndCommit(git, Map("src/a.c" -> "same\n", "lib/a.c" -> "same\n"), "first")
+
+    val stats = runWalker(
+      git.getRepository, dstDir, db, cmd, """\.c$""",
+      prepareFirst = true
+    )
+    stats.blobsRunThroughCommand shouldEqual 2
+
+    val dst = openBare(dstDir)
+    try {
+      fileAtHead(dst, "master", "src/a.c") shouldBe Some("src/a.c:same\n")
+      fileAtHead(dst, "master", "lib/a.c") shouldBe Some("lib/a.c:same\n")
+    } finally dst.close()
+  }
+
+  test("prepare-first resumes only pending tasks after abort") {
+    val w = freshWorkDir("prepare-resume")
+    val srcDir = w.resolve("src")
+    val dstDir = w.resolve("dst.git")
+    val db = w.resolve("map.sqlite")
+    val allow = w.resolve("allow-bad")
+    val log = w.resolve("calls.log")
+    val cmd = shellScript(w,
+      s"""echo "$$BFG_PATH" >> "${log.toAbsolutePath}"
+         |if [ "$$BFG_PATH" = "bad.c" ] && [ ! -f "${allow.toAbsolutePath}" ]; then
+         |  exit 7
+         |fi
+         |cat
+         |""".stripMargin)
+
+    val git = initSrc(srcDir)
+    writeAndCommit(git, Map("good.c" -> "good\n", "bad.c" -> "bad\n"), "first")
+
+    val failed = runWalker(
+      git.getRepository, dstDir, db, cmd, """\.c$""",
+      abortOnError = true, prepareFirst = true
+    )
+    failed.aborted shouldBe true
+    failed.commitsProcessed shouldEqual 0
+
+    val afterFailure = Mapping.open(db, cmd, """\.c$""")
+    try {
+      afterFailure.pendingBlobTaskCount shouldEqual 1
+      afterFailure.pendingBlobTasks(10).head.path shouldEqual "bad.c"
+      afterFailure.getBlob(
+        afterFailure.pendingBlobTasks(10).head.origBlob, "bad.c"
+      ) shouldBe None
+    } finally afterFailure.close()
+
+    Files.writeString(allow, "ok\n")
+    val resumed = runWalker(
+      git.getRepository, dstDir, db, cmd, """\.c$""",
+      abortOnError = true, prepareFirst = true
+    )
+    resumed.aborted shouldBe false
+    resumed.commitsProcessed shouldEqual 1
+    Files.readAllLines(log).asScala.count(_ == "good.c") shouldEqual 1
+    Files.readAllLines(log).asScala.count(_ == "bad.c") shouldEqual 2
+
+    val done = Mapping.open(db, cmd, """\.c$""")
+    try done.pendingBlobTaskCount shouldEqual 0 finally done.close()
   }
 
   test("cache hit: re-run on unchanged src skips the external command") {
