@@ -1,0 +1,4 @@
+# name	url	revision	commit_url
+libuv	https://github.com/libuv/libuv.git	f87c8e4f70f234b952d9c47b15fb567f78e5f399	https://github.com/libuv/libuv/commit/
+libgit2	https://github.com/libgit2/libgit2.git	0551dfd4ad989b6a3d5683c0d4cf326c6efef929	https://github.com/libgit2/libgit2/commit/
+curl	https://github.com/curl/curl.git	0b5759caa299e2f86abc8b140c56e16fd03cc744	https://github.com/curl/curl/commit/

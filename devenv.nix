@@ -66,6 +66,7 @@ let
   perlEnv = pkgs.perl.withPackages (p: [
     p.DBI
     p.DBDSQLite
+    p.DevelNYTProf
     EmailFind
     HTMLFromText
     p.HTMLParser
@@ -80,6 +81,8 @@ in
     pkgs.git
     pkgs.gnumake
     pkgs.gcc
+    pkgs.time
+    pkgs.strace
     pkgs.sqlite
     pkgs.git-filter-repo
 
@@ -89,6 +92,9 @@ in
     pkgs.sbt
 
     perlEnv
+  ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+    pkgs.perf
+    pkgs.inferno
   ];
 
   # Scala 2.13 + sbt 1.x needs a modern JDK; the legacy sbt 0.13 hack is gone.

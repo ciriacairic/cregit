@@ -25,7 +25,8 @@ https://github.com/cregit/cregit.
 
 The tokenization step is now provided by the [blobExec](./blobExec) sbt module
 (consumes upstream `com.madgag:bfg-library` from Maven Central). It replaces the
-previous `dmgerman/bfg-repo-cleaner@blobexec` fork. See [blobExec/README.md](./blobExec/README.md).
+previous `dmgerman/bfg-repo-cleaner@blobexec` fork. See
+[blobExec/README.org](./blobExec/README.org).
 
 ### Dependencies
 
@@ -61,22 +62,33 @@ This is the workflow to process a git repository with cregit, and to generate th
 
 ### Observation
 
-The entire pipeline can be executed with:
+After building the Scala jars and `tokenize/srcMLtoken/srcml2token`, the core
+pipeline through HTML generation can be executed with:
 
 ```sh
-./run_pipeline_process.sh
+./run_pipeline_process.sh \
+  --repo-url https://github.com/libuv/libuv.git \
+  --repo-name libuv \
+  --repo-rev f87c8e4f70f234b952d9c47b15fb567f78e5f399 \
+  --commit-url https://github.com/libuv/libuv/commit/ \
+  --file-mask '\.[ch]$' \
+  --work-dir ../cregit-libuv
 ```
 
-By default, the script starts from step 1 and executes the complete pipeline.
+The runner records per-stage wall time, CPU time, peak RSS, page faults, and I/O
+in `WORK_DIR/metrics.csv`. Use `./run_pipeline_process.sh --help` for all
+options. Dataset generation is disabled by default because
+`generate_dataset.py` is not part of this branch; `--with-dataset` fails early
+unless that script is available.
 
-To resume the pipeline from a specific step, pass the step number as the first
-argument. For example, to resume from step 5:
+To resume the pipeline from a specific step, use `--from-step`. A single
+positional integer remains accepted for compatibility:
 
 ```sh
-./run_pipeline_process.sh 5
+./run_pipeline_process.sh --from-step 5 --work-dir ../cregit-libuv
 ```
 
-Example run with default parameters (used jqlang/jq repository):
+Historical example run (using the jqlang/jq repository):
 ![Example cregit run](cregit.gif)
 p.s.: gif is sped up.
 
@@ -104,7 +116,10 @@ Run it as:
 export BFG_MEMO_DIR=/tmp/memo
 export BFG_TOKENIZE_CMD="/path/to/cregit/tokenize/tokenizeSrcMl.pl --srcml2token=/path/to/cregit/tokenize/srcMLtoken/srcml2token --srcml=srcml --ctags=/usr/local/bin/ctags"
 java -jar /path/to/cregit/blobExec/target/scala-2.13/blobExec-0.1.0-assembly.jar \
-  /path/repo \
+  --abort-on-error --prepare-first \
+  /path/to/original.git \
+  /path/to/cregit.git \
+  /path/to/blob-map.db \
   /path/to/cregit/tokenizeByBlobId/tokenBySha.pl \
   '\.[ch]$'
 ```

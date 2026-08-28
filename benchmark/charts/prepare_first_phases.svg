@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1215" height="409" viewBox="0 0 1215 409">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:system-ui,sans-serif;fill:#222}.title{font-size:22px;font-weight:700}.label{font-size:14px}.small{font-size:12px;fill:#555}</style>
+<text x="150" y="32" class="title">prepare-first phase breakdown</text>
+<text x="150" y="55" class="small">Internal phase timers; process startup and final bookkeeping explain the small gap to total wall time</text>
+<text x="138" y="110" text-anchor="end" class="label">jq</text>
+<rect x="150.00" y="90" width="3.22" height="28" fill="#f2cf5b"><title>discovery: 10.1s</title></rect>
+<rect x="153.22" y="90" width="16.99" height="28" fill="#4c78a8"><title>tokenization: 53.4s</title></rect>
+<rect x="170.20" y="90" width="20.78" height="28" fill="#e45756"><title>reconstruction: 1m05.3s</title></rect>
+<text x="199.0" y="110" class="label">2m10.4s</text>
+<text x="138" y="178" text-anchor="end" class="label">libuv</text>
+<rect x="150.00" y="158" width="9.01" height="28" fill="#f2cf5b"><title>discovery: 28.3s</title></rect>
+<rect x="159.01" y="158" width="134.35" height="28" fill="#4c78a8"><title>tokenization: 7m02.3s</title></rect>
+<rect x="293.36" y="158" width="45.53" height="28" fill="#e45756"><title>reconstruction: 2m23.1s</title></rect>
+<text x="346.9" y="178" class="label">10m11.3s</text>
+<text x="138" y="246" text-anchor="end" class="label">libgit2</text>
+<rect x="150.00" y="226" width="18.16" height="28" fill="#f2cf5b"><title>discovery: 57.1s</title></rect>
+<rect x="168.16" y="226" width="268.91" height="28" fill="#4c78a8"><title>tokenization: 14m05.1s</title></rect>
+<rect x="437.06" y="226" width="604.79" height="28" fill="#e45756"><title>reconstruction: 31m40.8s</title></rect>
+<text x="1049.9" y="246" class="label">48m11.4s</text>
+<rect x="150" y="329" width="16" height="16" fill="#f2cf5b"/>
+<text x="173" y="342" class="label">discovery</text>
+<rect x="360" y="329" width="16" height="16" fill="#4c78a8"/>
+<text x="383" y="342" class="label">tokenization</text>
+<rect x="570" y="329" width="16" height="16" fill="#e45756"/>
+<text x="593" y="342" class="label">reconstruction</text>
+</svg>

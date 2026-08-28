@@ -1,0 +1,4 @@
+repository,workload_class,commits,token_tasks,baseline_wall_seconds,prepared_wall_seconds,baseline_user_seconds,baseline_system_seconds,prepared_user_seconds,prepared_system_seconds,baseline_cpu_percent,prepared_cpu_percent,baseline_max_rss_kb,prepared_max_rss_kb,discovery_seconds,tokenization_seconds,reconstruction_seconds,exact_mapping_comparison
+jq,smoke,1938,1890,246.84,130.38,339.25,103.49,645.04,191.00,179,641,331932,331124,10.108,53.383,65.298,true
+libuv,medium,5743,12418,1045.03,611.33,1966.19,686.09,3252.12,1585.86,253,791,362264,369720,28.306,422.253,143.078,true
+libgit2,medium,16450,33735,3826.82,2891.41,6115.58,1981.48,9653.54,4075.49,211,474,643068,594720,57.062,845.133,1900.766,false

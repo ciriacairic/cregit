@@ -27,7 +27,7 @@ Produces =target/scala-2.13/blobExec-0.1.0-assembly.jar=.
 * Use
 
 #+begin_src sh
-java -jar blobExec-0.1.0-assembly.jar [--abort-on-error] \
+java -jar blobExec-0.1.0-assembly.jar [--abort-on-error] [--prepare-first] \
   <src.git> <dst.git> <db.sqlite> <command> <fileMaskRegex>
 #+end_src
 
@@ -39,6 +39,7 @@ java -jar blobExec-0.1.0-assembly.jar [--abort-on-error] \
 | =<command>=        | Absolute path to the per-blob script                                       |
 | =<fileMaskRegex>=  | Regex matched against each blob's filename, e.g. ='\.[ch]$'=               |
 | =--abort-on-error= | Exit 2 on the first non-zero =<command>= exit (default: skip the blob)     |
+| =--prepare-first=  | Prepare missing blobs globally before rebuilding commits (experimental)    |
 
 For each blob whose filename matches =<fileMaskRegex>=, =<command>= is
 invoked with:
@@ -55,13 +56,32 @@ compatible with BFG's =FormerCommitFooter=, which the cregit =remapCommits=
 step parses from each commit's last line).
 
 =BFG_FILENAME= is kept for backward compatibility with cregit's
-=tokenBySha.pl= (which keys its memo cache by basename). New tokenizers can
-use =BFG_PATH= to make path-aware decisions.
+=tokenBySha.pl=, which uses the extension to select the language and memo
+identity. New tokenizers can use =BFG_PATH= to make path-aware decisions.
 
 In the pipeline, =<command>= is =tokenizeByBlobId/tokenBySha.pl=, which also
 reads =BFG_MEMO_DIR= and =BFG_TOKENIZE_CMD= from the environment. That
 script's own per-blob memo cache is independent of and complementary to the
 SQLite mapping maintained by this jar.
+
+** Prepare-first strategy
+
+The default scheduler processes one commit at a time and waits for every
+matching blob in that commit before advancing. =--prepare-first= instead runs
+two passes:
+
+1. discover globally unique =(orig_blob, path)= misses and persist them in
+   =blob_task=;
+2. drain that queue in bounded parallel batches, storing output in the dst Git
+   object database and =blob_map=;
+3. walk the commits again and rebuild them using only prepared mappings.
+
+Only in-flight blob bytes are held in memory. A completed task is inserted in
+=blob_map= and removed from =blob_task= in one SQLite transaction. A crash
+before that transaction may leave an unreachable Git object, which is safe:
+the task stays pending and Git deduplicates the repeated insertion on restart.
+The flag is opt-in so benchmarks can compare both schedulers against identical
+inputs before changing the default.
 
 * Incremental updates
 
@@ -110,6 +130,13 @@ CREATE TABLE blob_map (
   processed_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
   PRIMARY KEY (orig_blob, path)
 );
+CREATE TABLE blob_task (
+  orig_blob  TEXT NOT NULL,
+  path       TEXT NOT NULL,
+  filename   TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+  PRIMARY KEY (orig_blob, path)
+);
 CREATE TABLE tree_map (
   orig_tree    TEXT PRIMARY KEY,
   new_tree     TEXT    NOT NULL,
@@ -151,6 +178,13 @@ database double as an audit trail ("what was the dst SHA for
 "every blob+path the walker has seen in src," useful for verifying
 processing coverage. For the xournal repo: 1019 rewritten + 545 identity =
 1564 rows.
+
+*** =blob_task=
+
+Durable queue used only by =--prepare-first=. Rows contain task metadata, not
+source or tokenized bytes. Successful tasks move atomically to =blob_map=;
+therefore remaining rows can be resumed after interruption without retaining
+the full workload in memory.
 
 *** =tree_map=
 
@@ -246,9 +280,12 @@ java -jar target/scala-2.13/blobExec-0.1.0-assembly.jar \
 A second invocation with the same arguments should report
 =commitsProcessed=0= and finish in well under a second.
 
-* Pipeline integration (follow-up)
+* Pipeline integration
 
-=run_pipeline_process.sh= still calls the old three-arg form. Step 2's
-pre-clone (=git clone --bare ORIGINAL CREGIT_BARE=) becomes unnecessary
-since this jar creates the destination repo itself, and step 3's invocation
-needs the new five-arg form. That change lives in a separate PR.
+=run_pipeline_process.sh= uses the five-argument interface and lets this jar
+create the destination repository. It also passes =--abort-on-error= so a
+failed tokenizer cannot silently produce a partially rewritten benchmark.
+The runner stores the persistent mapping database beside the two repositories,
+which allows an interrupted run to be resumed with the same command and mask.
+Pass =--blobexec-strategy prepare-first= to the runner to benchmark the global
+preparation strategy.
