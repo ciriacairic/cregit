@@ -114,7 +114,11 @@ sub Tokenize
     my $PARSER = "tokenizeSrcML";
     my ($filename) = @_;
     #    open(parser, "srcml --src-encoding utf8 -l C --position '$filename' | srcml2token |") or die "Unable to execute ctags on file [$filename]";
-    open(parser, "$srcml -l $language --position '$filename' | $srcml2token |") or die "Unable to execute ctags on file [$filename]";
+    # srcML 1.1.0 otherwise treats UTF-8 input as a legacy single-byte
+    # encoding and emits mojibake (for example, U+2018 becomes "â").  The
+    # pretty-printer later rejects that token stream because it no longer
+    # matches the original source bytes.
+    open(parser, "$srcml --src-encoding UTF-8 -l $language --position '$filename' | $srcml2token |") or die "Unable to execute ctags on file [$filename]";
 
     my $lastLine = -1;
 
