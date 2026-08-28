@@ -32,7 +32,8 @@
  
 use Digest::SHA qw(sha1_hex);
 use DBI;
-use File::Temp qw/ tempfile tempdir mkstemp/;
+use File::Temp qw(mkstemp);
+use Fcntl qw(:flock);
 use strict;
 use File::Path qw(make_path);
 use File::Copy;
@@ -81,21 +82,9 @@ if ($tokenizeCmd eq "") {
 }
 
 
-my $contents;
-
 die "Sha dir [$shaDir] does not exist" if not -d $shaDir;
 
 my $contents = join( "", <> );
-
-my $sha1 = sha1_hex($contents);
-
-#`printf "--------------\n"`;
-#`printf "$sha1\n" >> /speed/tmp/output.txt`;
-
-#`printenv | grep BFG  >> /speed/tmp/output.txt`;
-
-my $dir = $shaDir . '/' . substr($sha1, 0,2) . '/' . substr($sha1, 2,2);
-my $filename = $shaDir . '/' . substr($sha1, 0,2) . '/' . substr($sha1, 2,2) . '/' . $sha1;
 
 my $blob = $ENV{BFG_BLOB};
 my $blobFN = $ENV{BFG_FILENAME};
@@ -112,6 +101,26 @@ if (not defined($mapLang{$fileExt})) {
     die "unknown file extension [$fileExt]";
 }
 
+# Cache v2 includes the extension because identical bytes can require
+# different language handling. It also deliberately avoids the old
+# content-only cache namespace, whose entries may contain declaration names
+# derived from a random temporary filename.
+my $cacheKey = sha1_hex("cregit-token-v2\0$fileExt\0$contents");
+my $dir = $shaDir . '/' . substr($cacheKey, 0,2) . '/' . substr($cacheKey, 2,2);
+my $filename = $dir . '/' . $cacheKey;
+make_path($dir) if not -d $dir;
+
+# Universal Ctags includes the input filename in hashes used for anonymous
+# declaration names. A random tempfile therefore made clean pipeline runs
+# produce different Git object ids. Use a stable input path and serialize the
+# same cache key across processes so concurrent workers cannot race on it.
+my $stableInput = "$buildDir/blob-$cacheKey.$fileExt";
+# A fixed set of striped locks avoids leaving one filesystem inode per source
+# blob while still serializing identical keys (which always share a prefix).
+my $lockPath = "$buildDir/token-lock-" . substr($cacheKey, 0, 2);
+open(my $lock, ">>", $lockPath) or die "unable to open tokenization lock [$lockPath]: $!";
+flock($lock, LOCK_EX) or die "unable to lock tokenization key [$cacheKey]: $!";
+
 if (-f $filename) {
     open(IN, $filename) || die "unable to open memoized file [$filename]";
     my $contents = join( "", <IN> );
@@ -119,32 +128,33 @@ if (-f $filename) {
     close(IN);
     
 } else {
-
-  # srcml 1.1.0 requires a file extension to parse source code correctly,
-  # even when --language is specified. Use SUFFIX so the temp file gets
-  # the original file's extension (e.g. .c or .h).
-  my ($fh, $file) = tempfile( "$buildDir/tmpfile-in-XXXXX", SUFFIX => ".$fileExt" );
   my ($fout, $outfile) = mkstemp( "$buildDir/tmpfile-out-XXXXX" );
 
+  open(my $fh, ">", $stableInput) or die "unable to create stable tokenizer input [$stableInput]: $!";
   print $fh $contents;
-  close $fh;
+  close($fh) or die "unable to close stable tokenizer input [$stableInput]: $!";
 
   my $langOp = "--language=" . $mapLang{$fileExt};
 
-  open(PROC, "$tokenizeCmd $langOp $file |") or die "unable to execute $tokenizeCmd (verify variable BFG_TOKENIZE_CMD) [$tokenizeCmd]";
+  open(PROC, "$tokenizeCmd $langOp $stableInput |") or die "unable to execute $tokenizeCmd (verify variable BFG_TOKENIZE_CMD) [$tokenizeCmd]";
 
   while (<PROC>) {
       print $_;
       print $fout $_;
   }
-  close PROC;
-  close $fout;
-  if (not -d $dir) {
-      make_path($dir);
+  my $commandOk = close PROC;
+  my $commandStatus = $?;
+  close($fout) or die "unable to close tokenizer output [$outfile]: $!";
+  if (not $commandOk) {
+      unlink($outfile);
+      unlink($stableInput);
+      die "tokenization command failed for [$stableInput] with status [$commandStatus]";
   }
 
   move( $outfile, $filename) or die "The move operation to memoized directory failed: $!";
 
-  unlink($file)
+  unlink($stableInput);
 
 }
+
+close($lock) or die "unable to close tokenization lock [$lockPath]: $!";
